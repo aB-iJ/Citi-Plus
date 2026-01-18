@@ -3,7 +3,6 @@ env/
 
 # 忽略 Python 缓存和数据文件
 __pycache__/
-*.csv
 *.pkl
 .ipynb_checkpoints/
 .env 

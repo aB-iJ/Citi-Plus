@@ -5,3 +5,8 @@
     Citi-Plus/test/README_ENV.md文件详细给出了配置环境所需要的所有步骤（前提是你安装了conda）
     Citi-Plus/.gitignore文件规定了不需要git追踪的文件/文件夹，以后对这些文件/文件夹所做的所有更改不会被git跟踪，也不会被push到github里。
         **看不懂请不要随删除/修改/移动，否则整个虚拟环境和缓存文件夹都将被git跟踪，轻易无法删除！**
+
+## 2026.01.19 03:45 , 李桂聿 (programmingWTF) - 更改了.gitignore文件使git跟踪 *.csv 数据文件
+    Citi-Plus/.gitignore文件里删除了 *.csv，使git跟踪 *.csv 文件
+    Citi-Plus/test/input_data下的五个csv文件被跟踪
+    Citi-Plus/test/data下的一个csv文件被跟踪
