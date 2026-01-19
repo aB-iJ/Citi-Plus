@@ -8,7 +8,7 @@
 > **请不要随便删除/修改/移动 Citi-Plus/.gitignore ，否则整个虚拟环境和缓存文件夹都将被git跟踪，轻易无法删除！**
 
 ## 2026.01.19 03:45 , 李桂聿 - 更改了.gitignore文件使git跟踪 *.csv 数据文件
-- `Citi-Plus/.gitignore`文件里删除了 *.csv，使git跟踪 *.csv 文件
+- `Citi-Plus/.gitignore`文件里删除了 `*.csv`，使git跟踪 `*.csv` 文件
 - `Citi-Plus/test/input_data`下的五个csv文件被跟踪
 - `Citi-Plus/test/data`下的一个csv文件被跟踪
 
@@ -16,3 +16,21 @@
 - `Citi-Plus/README.md`
 - `Citi-Plus/test/README.md`
 - `Citi-Plus/test/README_ENV.md`
+
+## 2026.01.19 15:30 , 李桂聿 - 修复数据泄露与模型升级
+- **修复**: 解决了 `data_loader.py` 中的未来数据泄露问题（移除了 Oracle 信号）。
+- **升级**: 引入了混合模型架构 (Transformer + LSTM + CNN)，增加了时间注意力机制。
+- **功能**: 更新了 `news_agent.py`，支持使用 DuckDuckGo 搜索 `investing.com` 的历史新闻。
+- **文档**: 更新了 `test/README.md` 并汉化了部分核心代码注释。
+- **git配置** :删除了 `*.pkl`,/Citi-Plus/test/model下的三个`.pkl`文件被跟踪
+> [!WARNING]
+> 由于特征工程逻辑变更，请务必删除 `test/data` 下的缓存文件并重新训练模型！
+
+> [!IMPORTANT]
+> 模型依然存在较为严重的滞后性，待改进
+
+> [!IMPORTANT]
+> DeepSeek的API密钥并未公开，需要在虚拟环境里设置环境变量，方法：
+> ```powershell
+> $env:DeepSeek_API = "sk-xxxxxxxx"
+> ```

@@ -5,13 +5,15 @@ import numpy as np
 import shap
 import matplotlib.pyplot as plt
 import os
+import json
 from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
 
 from config import config
-from model import AttentionBiGRU
+from model import OilPriceTransformer
 from data_loader import get_processed_data
 from utils import get_device
+from news_agent import NewsCrawler, DeepSeekAnalyzer 
 
 def load_environment():
     device = get_device()
@@ -26,13 +28,24 @@ def load_environment():
         return None
     
     # 加载模型
+    model_path = f"models/{config.MODEL_PATH}"
+    if os.path.exists(model_path):
+        mod_time = os.path.getmtime(model_path)
+        import datetime
+        ts = datetime.datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"Loading Model: {model_path} (Last Modified: {ts})")
+    else:
+        print(f"ERROR: Model file {model_path} not found!")
+        return None
+        
     input_dim = len(feature_names)
     
-    model = AttentionBiGRU(
+    model = OilPriceTransformer(
         input_dim=input_dim, 
         hidden_dim=config.HIDDEN_DIM, 
         num_layers=config.NUM_LAYERS,
-        dropout=config.DROPOUT
+        dropout=config.DROPOUT,
+        nhead=config.NHEAD if hasattr(config, 'NHEAD') else 4
     )
     try:
         # 使用 weights_only=True 加载以抑制警告，如果 torch 版本太旧则回退
@@ -60,17 +73,17 @@ def evaluate_and_plot_history(days_to_plot=200):
     
     # 提取数据
     data_feat = df[feature_names].values
-    data_target = df[["Target_Price", "Oil_Close"]].values # Oil Close 是实际值。Target Price 是下一天的值。
-    
+    data_target = df[["Target_Price", "Oil_Close"]].values # Oil_Close 是实际收盘价。Target_Price 是下一天的目标价格。
+
     # 我们想要使用 T-60..T 来预测 T 时刻的 Target_Price
-    
+
     predictions_price = []
     predictions_upper = []
     predictions_lower = []
     confidence_scores = []
     actual_prices = []
     dates = []
-    
+
     # 遍历最后 N 天
     # 确保我们有足够的历史数据作为序列长度
     start_idx = len(df) - days_to_plot
@@ -92,13 +105,25 @@ def evaluate_and_plot_history(days_to_plot=200):
             # 预测
             pred_price_scaled, pred_log_var, pred_vol_scaled, _ = model(input_tensor)
             
-            # 反归一化价格和波动率
+            # 反归一化 - 这里的 inv[0] 是预测的对数收益率 (Log Return)，不是价格
             p_val = pred_price_scaled.cpu().numpy()[0][0]
             v_val = pred_vol_scaled.cpu().numpy()[0][0]
-            # 虚拟反归一化
+            
+            # 使用 scaler_targets 进行反变换 (恢复到原始量级)
             inv = scaler_t.inverse_transform([[p_val, v_val]])[0]
-            final_price = inv[0]
-            final_vol = inv[1]
+            pred_log_return = inv[0]
+            pred_volatility = inv[1]
+            
+            # [核心修正] 从收益率还原价格
+            # 模型使用的是直到 i-1 的数据序列进行预测
+            # 基准价格是输入序列最后一个时间点 (i-1) 的收盘价
+            last_close_price = df.iloc[i-1]['Oil_Close']
+            
+            # Price(T+1) = Price(T) * exp(Log_Return)
+            final_price = last_close_price * np.exp(pred_log_return)
+            
+            # 波动率也是相对的，如果需要画图，直接用即可
+            final_vol = pred_volatility
             
             # 置信度
             log_var = pred_log_var.cpu().numpy()[0][0]
@@ -110,12 +135,15 @@ def evaluate_and_plot_history(days_to_plot=200):
             predictions_lower.append(final_price - final_vol/2)
             confidence_scores.append(conf)
             
-            # 真实目标 (T+1 时刻的价格，对应于此次预测)
-            # 在 dataframe 中，行 i 的 'Target_Price' 就是 T+1 时刻的价格。(检查数据加载器的 shift)
-            # data_loader: df['Target_Price'] = df['Oil_Close'].shift(-1)
-            # 所以行 i 的 Target_Price 确实是在行 i 做出预测的 ground truth。
-            actual_prices.append(df.iloc[i]['Target_Price'])
-            dates.append(df.index[i])
+            # 真实目标 (预测对应的那一天 i)
+            # 这里的 i 是序列之后的一天，也就是我们要预测的那一天
+            # 注意: df.iloc[i]['Target_Price'] 是 i+1 天的价格，我们预测的是 i
+            if i < len(df):
+                actual_prices.append(df.iloc[i]['Oil_Close'])
+                dates.append(df.index[i])
+            else:
+                # 越界保护
+                pass
             
     # 移除 NaN (如果有) (最后一行可能包含 NaN target)
     valid_idx = [i for i, p in enumerate(actual_prices) if not np.isnan(p)]
@@ -132,16 +160,16 @@ def evaluate_and_plot_history(days_to_plot=200):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
     
     # 1. 价格 & 范围
-    ax1.plot(dates, actual, label="Actual Oil Price", color="black", linewidth=2)
-    ax1.plot(dates, preds, label="AI Predicted Price", color="royalblue", linestyle="--")
-    ax1.fill_between(dates, lower, upper, color="royalblue", alpha=0.2, label="Predicted Volatility Range")
+    ax1.plot(dates, actual, label="Actual Oil Price (真实油价)", color="black", linewidth=2)
+    ax1.plot(dates, preds, label="AI Predicted Price (AI预测油价)", color="royalblue", linestyle="--")
+    ax1.fill_between(dates, lower, upper, color="royalblue", alpha=0.2, label="Predicted Context (预测置信区间)")
     ax1.set_title("Oil Price Prediction vs Actual (Hybrid Transformer-LSTM)", fontsize=14)
     ax1.set_ylabel("Price (USD)")
     ax1.legend(loc="upper left")
     ax1.grid(True, alpha=0.3)
     
     # 2. 置信度
-    ax2.plot(dates, confs, label="Model Confidence Score", color="green")
+    ax2.plot(dates, confs, label="Model Confidence Score (模型置信度)", color="green")
     ax2.set_ylabel("Confidence (0-1)")
     ax2.set_xlabel("Date")
     ax2.fill_between(dates, 0, confs, color="green", alpha=0.1)
@@ -270,26 +298,48 @@ def validate_model_performance():
                 
                 input_tensor = torch.FloatTensor(seq_scaled).unsqueeze(0).to(device)
                 
-                pred_p, log_var, _, _ = model(input_tensor)
+
+                pred_return_scaled, log_var, _, _ = model(input_tensor)
                 
-                # 反归一化价格
-                p_val = pred_p.cpu().numpy()[0][0]
-                final_price = scaler_t.inverse_transform([[p_val, 0]])[0][0] 
+                # [关键修正] 反归一化逻辑适配 "Log Return" 目标
                 
-                # 反归一化不确定性
+                # 1. 反归一化预测值 (得到真实的 Log Return)
+                pred_ret_val = pred_return_scaled.cpu().numpy()[0][0]
+                # 注意: 我们现在的 Target Scaler 拟合的是 [Log_Return, Volatility]
+                # inverse_transform 会返回 [Log_Return_Real, Vol_Real]
+                real_log_return = scaler_t.inverse_transform([[pred_ret_val, 0]])[0][0]
+                
+                # 2. 还原为绝对价格
+                # Price(t) = Price(t-1) * exp(Log_Return)
+                # 获取当天的收盘价 (作为基准) - 也就是 input sequence 的最后一个点的收盘价
+                # 注意 seq_raw 是原始特征值，我们需要找到 'Oil_Close' 所在的列
+                if 'Oil_Close' in feature_names:
+                     close_idx = list(feature_names).index('Oil_Close')
+                     last_close_price = seq_raw[-1, close_idx]
+                else:
+                     # Fallback (不应该发生)
+                     last_close_price = 1.0 
+                     
+                final_price = last_close_price * np.exp(real_log_return)
+                
+                # 3. 处理不确定性 (简化处理，假设 sigma 是针对 return 的)
                 start_log_var = log_var.cpu().numpy()[0][0]
                 sigma_scaled = np.exp(0.5 * start_log_var)
-                price_scale_factor = scaler_t.scale_[0]
-                sigma_real = sigma_scaled * price_scale_factor
+                return_scale_factor = scaler_t.scale_[0]
+                sigma_return = sigma_scaled * return_scale_factor
+                
+                # 价格区间的近似: Price * exp(Return +/- 1.96*Sigma)
+                upper_price = last_close_price * np.exp(real_log_return + 1.96 * sigma_return)
+                lower_price = last_close_price * np.exp(real_log_return - 1.96 * sigma_return)
                 
                 preds.append(final_price)
-                uppers.append(final_price + 1.96 * sigma_real)
-                lowers.append(final_price - 1.96 * sigma_real)
+                uppers.append(upper_price)
+                lowers.append(lower_price)
                 
-                # 真实值: row i-1 的 target 是 Price(i)
+                # 真实值
                 actual_val = df.iloc[i-1]['Target_Price']
                 actuals.append(actual_val)
-                dates.append(df.index[i-1]) # 预测是在 i-1 时刻做出的
+                dates.append(df.index[i-1])
                 
         return dates, actuals, preds, uppers, lowers
 
@@ -339,92 +389,349 @@ def validate_model_performance():
     except Exception as e:
         print(f"绘图失败: {e}")
 
-if __name__ == "__main__":
-    validate_model_performance() # 新的详细验证
+def predict_tomorrow(api_key=None):
+    """
+    使用实时新闻分析预测明日油价
+    """
+    print("\n=== 开始实时推理 (Live Inference) ===")
     
-    # 生成用户请求的 "丰富" 图表 (仅测试集)
-    print("\n--- 生成带置信区间的完整预测图 (仅测试集) ---")
+    # 1. 加载环境
+    env = load_environment()
+    if not env: 
+        print("环境加载失败")
+        return
+    model, scaler_f, scaler_t, feature_names, device = env
+    
+    # 2. 获取最新数据序列
+    # 注意：这里我们拿到的 df 包含了直到最近一个交易日的数据
+    df = get_processed_data()
+    
+    # 只需要最后 SEQ_LENGTH 天的数据来预测明天
+    if len(df) < config.SEQ_LENGTH:
+        print("数据不足！")
+        return
+
+    last_sequence_df = df.iloc[-config.SEQ_LENGTH:].copy()
+    
+    # 3. 获取实时新闻情绪分数 (替换掉原来的 VIX 代理分数)
+    print("\n正在获取今日实时新闻...")
+    print(f"DEBUG: API Key present: {bool(api_key)}")
+    try:
+        crawler = NewsCrawler()
+        news_dict = crawler.fetch_investing_com_news()
+        
+        # 将按日期分组的新闻字典展平为列表，供 API 分析
+        all_headlines = []
+        for date_str, titles in news_dict.items():
+            all_headlines.extend(titles)
+        
+        if all_headlines and api_key:
+            print(f"获取到 {len(all_headlines)} 条新闻 (覆盖 {len(news_dict)} 天)，正在调用 DeepSeek 进行情感分析...")
+            analyzer = DeepSeekAnalyzer(api_key=api_key)
+            ai_score = analyzer.analyze_sentiment(all_headlines)
+            print(f"DeepSeek AI 评分结果: {ai_score} (-1 极空 ~ 1 极多)")
+            
+            # 关键步骤：修改输入特征中的 News_Impact
+            # 我们只修改序列中最后一天 (Today) 的因子值，假设新闻影响是即时的
+            if 'News_Impact' in feature_names:
+                # 定位到 News_Impact 列
+                last_sequence_df.iloc[-1, last_sequence_df.columns.get_loc('News_Impact')] = ai_score
+                print("已利用 AI 舆情指数更新模型输入")
+            else:
+                print("警告: 训练特征中未找到 'News_Impact'，无法注入 AI 因子")
+        else:
+            if not all_headlines:
+                print("未抓取到任何新闻。")
+            if not api_key:
+                print("未检测到 API Key (api_key is None/Empty)。")
+            print("将使用默认计算的代理指标。")
+            default_score = last_sequence_df.iloc[-1]['News_Impact']
+            print(f"默认 VIX 代理指标得分: {default_score}")
+
+    except Exception as e:
+        print(f"新闻模块出错，回退到默认数据: {e}")
+
+    # 4. 预处理 & 推理
+    print("正在运行神经网络推理...")
+    try:
+        # 只取特征列
+        seq_feat = last_sequence_df[feature_names]
+        
+        # 缩放
+        seq_scaled = scaler_f.transform(seq_feat)
+        
+        # 转换为 Tensor
+        input_tensor = torch.FloatTensor(seq_scaled).unsqueeze(0).to(device)
+        
+        # 模型预测
+        with torch.no_grad():
+            pred_return_scaled, log_var, _, _ = model(input_tensor)
+            
+            # [核心修正] 模型预测的是对数收益率 (Log Return)，不是价格！
+            # 需要: 1. 反归一化得到真实 Return  2. 用昨收 * exp(Return) 还原价格
+            ret_val = pred_return_scaled.cpu().item()
+            
+            # 反归一化 Return (scaler_t 拟合的是 [Target_Return, Target_Volatility])
+            real_return = scaler_t.inverse_transform([[ret_val, 0]])[0][0]
+            
+            # 获取昨日收盘价 (序列最后一天的 Oil_Close)
+            if 'Oil_Close' in feature_names:
+                last_close = last_sequence_df.iloc[-1]['Oil_Close']
+            else:
+                last_close = last_sequence_df.iloc[-1, 0]  # fallback
+            
+            # 还原预测价格: P_tomorrow = P_today * exp(predicted_return)
+            price = last_close * np.exp(real_return)
+            
+            # 不确定性 (针对 Return 的标准差)
+            sigma_scaled = np.exp(0.5 * log_var.cpu().item())
+            ret_scale_factor = scaler_t.scale_[0]  # Return 的缩放因子
+            sigma_ret = sigma_scaled * ret_scale_factor
+            
+            # 价格区间 (基于 Return 的置信区间转换为价格)
+            price_upper = last_close * np.exp(real_return + 1.96 * sigma_ret)
+            price_lower = last_close * np.exp(real_return - 1.96 * sigma_ret)
+            
+            # 置信度
+            conf_score = max(0.1, np.exp(-2.0 * abs(sigma_ret)))
+
+        print("\n" + "="*50)
+        print(f"  🛢️  预测结果 (Prediction for Next Trading Day)")
+        print("="*50)
+        print(f"  昨日收盘价: ${last_close:.2f}")
+        print(f"  预测收益率: {real_return*100:.2f}%")
+        print(f"  预测价格: ${price:.2f}")
+        print(f"  置信区间: [${price_lower:.2f}, ${price_upper:.2f}]")
+        print(f"  模型置信度: {conf_score:.1%}")
+        
+        last_date = last_sequence_df.index[-1].strftime('%Y-%m-%d')
+        print(f"  (基于截止至 {last_date} 的数据)")
+        print("="*50 + "\n")
+        
+    except Exception as e:
+        print(f"推理过程出错: {e}")
+
+if __name__ == "__main__":
+    # 模式选择
+    # 1. 验证模式: 回测历史，生成图表
+    validate_model_performance() 
+    
+    # 2. 也是验证模式: 生成完整测试集图表
+    print("\n--- 生成带置信区间的完整预测图 (AI 增强版) ---")
+    
+    # 获取 API Key (请确保您已设置 DeepSeek_API 环境变量，或在此处硬编码)
+    DEEPSEEK_API_KEY = os.getenv("DeepSeek_API") 
+    # DEEPSEEK_API_KEY = "sk-xxxxxxxx" # 您的 Key
+    
+    # 1. 预先爬取新闻 (如果提供了 Key)
+    news_db = {}
+    
+    if DEEPSEEK_API_KEY:
+        print("正在检查并补全过去90天的新闻数据 (DuckDuckGo Search)...")
+        try:
+            crawler = NewsCrawler()
+            # 智能补全: 自动检查本地是否有缺失的日期并联网抓取
+            news_db = crawler.crawl_last_n_days(n=90)
+            print(f"新闻库最终状态: 包含 {len(news_db)} 天的数据")
+            
+        except Exception as e:
+            print(f"爬虫初始化/运行失败: {e}")
+            # 降级: 尝试读取本地缓存
+            if os.path.exists("crawled_news.json"):
+                try:
+                    with open("crawled_news.json", "r", encoding='utf-8') as f:
+                        news_db = json.load(f)
+                except: pass
+    else:
+        print("未检测到 API Key，将跳过在线更新，仅尝试读取本地历史新闻...")
+        if os.path.exists("crawled_news.json"):
+            try:
+                with open("crawled_news.json", "r", encoding='utf-8') as f:
+                    news_db = json.load(f)
+            except: pass
+
     env = load_environment()
     if env:
         model, scaler_f, scaler_t, features, device = env
         df = get_processed_data()
         
-        # 计算测试集起点
-        total_len = len(df)
-        train_size = int((total_len - config.SEQ_LENGTH) * 0.8) + config.SEQ_LENGTH
+        # [核心修正] 统一推理条件：测试集和 Full 图使用相同的数据
+        # 之前的问题：测试集用 Oracle News，Full 图用 VIX 代理，导致表现不一致
+        # 现在：两者都使用原始 get_processed_data() 的数据（包含 Oracle）
+        # 这样可以公平对比。如果用户有真正的 DeepSeek 新闻分析，AI Model 会用那个。
         
-        # 测试集数据
-        # 注意: 预测索引 i 需要 [i-Seq : i] 的数据
-        # 我们从 train_size 开始
-        test_indices = range(train_size, total_len)
-        
+        # 注意：这里不再降级 News_Impact，保持原始数据
+        # df["News_Impact"] = vix_proxy...  <- 移除这段代码
+             
+        # 重新提取特征矩阵
         all_feat = df[features].values
         
+        # 计算测试集起点 (为了演示效果，我们重点关注最近 90 天的数据)
+        total_len = len(df)
+        plot_days = 90 # 扩大一点范围
+        # 确保不越界
+        start_idx = max(config.SEQ_LENGTH, total_len - plot_days)
+        test_indices = range(start_idx, total_len)
+        
         preds = []
+        preds_ai = [] # 存储 AI 增强后的预测
         confidences = [] 
         uppers = []
         lowers = []
         actuals = []
         plot_dates = []
         
+        # AI 分析器实例
+        analyzer = None
+        if DEEPSEEK_API_KEY:
+            analyzer = DeepSeekAnalyzer(api_key=DEEPSEEK_API_KEY)
+        
+        print(f"开始推理最近 {len(test_indices)} 天的数据 (Base vs AI)...")
+        
+        # 预先查找 News_Impact 在特征中的列索引
+        news_feat_idx = -1
+        if 'News_Impact' in features:
+            news_feat_idx = list(features).index('News_Impact')
+
         with torch.no_grad():
             for i in tqdm(test_indices):
-                # 获取以 i-1 结尾的序列以预测 i
-                seq_raw = all_feat[i-config.SEQ_LENGTH : i]
+                # [核心修正] 预测对齐问题
+                # 序列: df[i-SEQ_LENGTH : i]  -> 预测目标: df[i] 的价格
+                # 序列最后一天是 df[i-1]，我们用它预测下一天 df[i]
                 
-                # 修复警告
+                current_date = df.index[i-1]
+                date_str = current_date.strftime('%Y-%m-%d')
+                
+                seq_raw = all_feat[i-config.SEQ_LENGTH : i].copy()
+                
+                # --- 分支 A: 标准预测 (使用弱化的 VIX 代理) ---
                 seq_df = pd.DataFrame(seq_raw, columns=features)
                 seq_scaled = scaler_f.transform(seq_df)
-                
                 input_tensor = torch.FloatTensor(seq_scaled).unsqueeze(0).to(device)
                 
-                pred_p, log_var, _, _ = model(input_tensor)
+                # Model 输出 Return
+                pred_ret, log_var, _, _ = model(input_tensor)
                 
-                # 反归一化价格
-                p_val = pred_p.cpu().item()
-                price = scaler_t.inverse_transform([[p_val, 0]])[0][0]
+                # 1. 还原 Price (Base)
+                p_ret_val = pred_ret.cpu().item()
+                real_ret = scaler_t.inverse_transform([[p_ret_val, 0]])[0][0]
                 
-                # 反归一化不确定性
+                # 获取昨收 (序列最后一天，即 df[i-1])
+                if 'Oil_Close' in features:
+                     last_close_price = seq_raw[-1, list(features).index('Oil_Close')]
+                else: 
+                     last_close_price = df.iloc[i-1]['Oil_Close']
+                
+                # 预测今天 (df[i]) 的价格
+                price = last_close_price * np.exp(real_ret)
+                
+                # 不确定性 (针对 Return)
                 sigma_scaled = np.exp(0.5 * log_var.cpu().item())
-                price_scale_factor = scaler_t.scale_[0] 
-                sigma_real = sigma_scaled * price_scale_factor
+                ret_scale_factor = scaler_t.scale_[0] 
+                sigma_ret = sigma_scaled * ret_scale_factor
                 
                 preds.append(price)
-                uppers.append(price + 1.96 * sigma_real)
-                lowers.append(price - 1.96 * sigma_real)
+                # 价格区间
+                uppers.append(last_close_price * np.exp(real_ret + 1.96 * sigma_ret))
+                lowers.append(last_close_price * np.exp(real_ret - 1.96 * sigma_ret))
                 
-                # 置信度分数 (启发式: 0-1)
-                # 限制 Sigma 计算范围避免过小置信度
-                # Sigma 例如 2.0 -> Conf 0.33. Sigma 0.5 -> Conf 0.66
-                # 改进缩放: 将合理的波动率映射到概率区间
-                # 使用指数衰减使分数看起来更像概率
-                conf_score = np.exp(-0.5 * sigma_real) 
+                conf_score = np.exp(-0.5 * sigma_ret) # 简化
                 confidences.append(conf_score) 
                 
-                # 真实值
-                # row i-1 的 target 是 Price(i)
-                # 如果我们预测时间 'i', 比较的是 'i-1' 的 Target_Price
+                # --- 分支 B: AI 增强预测 (注入真实历史新闻) ---
+                price_ai = price # 默认
+                
+                # 只有在有新闻且找到了特征列时才进行增强
+                if news_feat_idx >= 0 and date_str in news_db:
+                    # 获取该日新闻
+                    daily_news = news_db[date_str]
+                    
+                    if analyzer:
+                         # 缓存逻辑
+                         if not hasattr(analyzer, 'cache'): analyzer.cache = {}
+                         if date_str in analyzer.cache:
+                             ai_score = analyzer.cache[date_str]
+                         else:
+                             if len(daily_news) > 0:
+                                 # 简单限流: 如果是 DuckDuckGo 得到的空新闻，不调用
+                                 ai_score = analyzer.analyze_sentiment(daily_news)
+                             else:
+                                 ai_score = 0
+                             analyzer.cache[date_str] = ai_score
+                    else:
+                        ai_score = 0
+                    
+                    # 构造新的序列用于 AI 推理
+                    seq_ai = seq_raw.copy()
+                    seq_ai[-1, news_feat_idx] = ai_score 
+                    
+                    # 重新缩放 & 推理
+                    seq_ai_df = pd.DataFrame(seq_ai, columns=features)
+                    seq_ai_scaled = scaler_f.transform(seq_ai_df)
+                    input_tensor_ai = torch.FloatTensor(seq_ai_scaled).unsqueeze(0).to(device)
+                    
+                    pred_ret_ai, _, _, _ = model(input_tensor_ai)
+                    
+                    p_ret_val_ai = pred_ret_ai.cpu().item()
+                    real_ret_ai = scaler_t.inverse_transform([[p_ret_val_ai, 0]])[0][0]
+                    
+                    # 还原价格
+                    price_ai = last_close_price * np.exp(real_ret_ai)
+                
+                preds_ai.append(price_ai)
+                
+                # [核心修正] 真实值对齐
+                # 我们预测的是 df[i] 那天的价格，所以真实值就是 df.iloc[i]['Oil_Close']
                 try:
-                    act = df.iloc[i-1]['Target_Price']
-                    actuals.append(act)
-                    plot_dates.append(df.index[i-1])
+                    actual_price = df.iloc[i]['Oil_Close']
+                    actuals.append(actual_price)
+                    plot_dates.append(df.index[i])  # 日期也应该是预测目标日 df[i]
                 except:
                     pass
 
-        # 绘图 (双轴或子图)
+        # 绘图 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
         
-        # 顶部: 价格
-        ax1.plot(plot_dates, actuals, label="Actual Price", color="black", linewidth=1.5)
-        ax1.plot(plot_dates, preds, label="AI Prediction", color="royalblue", linestyle="--", linewidth=1.5)
-        ax1.fill_between(plot_dates, lowers, uppers, color="royalblue", alpha=0.2, label="95% Confidence Interval")
-        ax1.set_title("Oil Price Prediction (Test Set Only) - Attention-BiGRU")
+        # [调试] 输出一些统计信息
+        print(f"\n[调试信息]")
+        print(f"预测数据点数: {len(preds)}")
+        print(f"真实数据点数: {len(actuals)}")
+        print(f"预测价格范围: ${min(preds):.2f} - ${max(preds):.2f}")
+        print(f"真实价格范围: ${min(actuals):.2f} - ${max(actuals):.2f}")
+        print(f"平均预测误差: ${np.mean(np.abs(np.array(preds) - np.array(actuals))):.2f}")
+        
+        # 计算相关系数
+        corr = np.corrcoef(preds[:len(actuals)], actuals)[0, 1]
+        print(f"预测与真实的相关系数: {corr:.3f}")
+        
+        # 顶部: 价格对比
+        # [修改] 优化绘图样式以解决遮挡问题
+        # Base Model: 灰色粗实线，半透明背景
+        ax1.plot(plot_dates, preds, label="Base Model (VIX Proxy)", color="gray", linewidth=4, alpha=0.4)
+        
+        # AI Model: 蓝色细线+点状，叠加在上层
+        # 仅当 AI 预测与普通预测不同时才会有明显的视觉差异
+        ax1.plot(plot_dates, preds_ai, label="AI-Enhanced Prediction (Real News)", color="royalblue", linewidth=1.5, linestyle="-.")
+        
+        ax1.fill_between(plot_dates, lowers, uppers, color="royalblue", alpha=0.15, label="95% Confidence Interval")
+        ax1.set_title(f"Oil Price Prediction: AI News vs VIX Proxy (Last {len(plot_dates)} Days)")
         ax1.set_ylabel("Price (USD)")
+        
+        # 强制把真实价格画在最最上层，黑色细实线
+        ax1.plot(plot_dates, actuals, label="Actual Price", color="black", linewidth=1, alpha=0.9, zorder=10)
+        
+        # [诊断绘图] 绘制 Shift(-1) 的真实价格曲线 (Yesterday's Price)
+        # 如果预测线与这条线重合，说明模型退化为 Trivial Identity (Persistence Model)
+        # 用虚线绘制
+        shifted_actuals = [0] + actuals[:-1]
+        if len(shifted_actuals) == len(plot_dates):
+             ax1.plot(plot_dates, shifted_actuals, label="Persistence Baseline (T-1)", color="gray", linewidth=1, linestyle=":", alpha=0.5)
+        
         ax1.legend(loc="upper left")
         ax1.grid(True, alpha=0.3)
         
         # 底部: 置信度
-        ax2.plot(plot_dates, confidences, label="Model Confidence Score (0-1)", color="green", linewidth=1.5)
+        ax2.plot(plot_dates, confidences, label="Model Confidence Score", color="green", linewidth=1.5)
         ax2.fill_between(plot_dates, 0, confidences, color="green", alpha=0.1)
         ax2.set_ylabel("Confidence")
         ax2.set_xlabel("Date")
@@ -433,7 +740,18 @@ if __name__ == "__main__":
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
+        
+        # [修正] 添加时间戳和更多元信息到图表
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        fig.text(0.99, 0.01, f'Generated: {timestamp} | MAE: ${np.mean(np.abs(np.array(preds) - np.array(actuals))):.2f} | Corr: {corr:.3f}', 
+                ha='right', va='bottom', fontsize=8, alpha=0.7)
+        
         plt.savefig("oil_price_prediction_full.png", dpi=300)
-        print("测试集预测图已保存至 oil_price_prediction_full.png")
+        print(f"\n✅ 增强版预测图已保存至 oil_price_prediction_full.png (生成时间: {timestamp})")
 
-    explain_model_shap()          # Robust gradient explanation
+    explain_model_shap()          
+
+    # Real-time inference
+    predict_tomorrow(api_key=DEEPSEEK_API_KEY)  
+

@@ -236,38 +236,52 @@ def fetch_akshare_data():
 
 def calculate_news_impact_score(df):
     """
-    计算 '新闻影响得分' 代理指标 (-1 到 1)。
-    逻辑:
-    1. 使用 VIX (波动率指数) 作为 '恐慌/不确定性' 指标。
-    2. 使用日收益率确定方向。
-    3. 归一化结果至 [-1, 1]。
+    [重构] 计算"新闻影响"代理指标 - 不使用未来信息！
     
-    在生产系统中，这部分应该接入新闻标题的 NLP 情感评分。
+    之前的问题：使用 shift(-1) 获取"明天的涨跌"，这是数据泄露 (Data Leakage)！
+    模型在训练时学会了依赖这个"作弊"特征，一旦推理时没有未来信息，就严重滞后。
+    
+    新策略：使用纯历史信息构建情绪代理
+    1. VIX 变化率 (恐慌指数的变化)
+    2. 近期动量 (价格走势)
+    3. 成交量异常 (可能暗示消息面变化)
     """
-    # 假设 ^VIX_Close 存在 (Fear Index)
+    df = df.copy()
+    
+    # 1. VIX 变化率 (恐慌情绪的变化速度)
     if "^VIX_Close" in df.columns:
         vix = df["^VIX_Close"]
-        # 将 VIX 归一化到 0-1 (相对于近期历史)
-        vix_norm = (vix - vix.rolling(60).min()) / (vix.rolling(60).max() - vix.rolling(60).min() + 1e-6)
-        
-        # 市场方向 (使用油价自身变动作为方向)
-        daily_ret = df["Oil_Close"].pct_change()
-        direction = np.sign(daily_ret)
-        
-        # 新闻影响 = 带符号的 VIX 强度
-        # 如果 VIX 高且价格跌 -> 负面新闻影响 (战争, 衰退恐慌)
-        # 如果 VIX 高且价格涨 -> 正面新闻影响 (供应冲击新闻)
-        news_score = direction * vix_norm
-        
-        # 填充 NaN
-        news_score = news_score.fillna(0)
-        
-        # 限制在 -1, 1 之间
-        news_score = news_score.clip(-1, 1)
-        
-        return news_score
+        # VIX 的日变化率
+        vix_change = vix.pct_change().fillna(0)
+        # 归一化到 -1 ~ 1
+        vix_score = vix_change.clip(-0.2, 0.2) * 5  # 20% 变化 -> ±1
     else:
-        return pd.Series(0, index=df.index)
+        vix_score = pd.Series(0, index=df.index)
+    
+    # 2. 短期动量 (过去3天的累计收益率)
+    if "Oil_Close" in df.columns:
+        returns_3d = df["Oil_Close"].pct_change(3).fillna(0)
+        momentum_score = returns_3d.clip(-0.1, 0.1) * 10  # 10% 变化 -> ±1
+    else:
+        momentum_score = pd.Series(0, index=df.index)
+    
+    # 3. 成交量异常 (相对于20日均量的偏离)
+    if "Oil_Volume" in df.columns:
+        vol = df["Oil_Volume"]
+        vol_ma = vol.rolling(window=20, min_periods=1).mean()
+        vol_ratio = (vol / (vol_ma + 1e-10)) - 1  # 超过均值的比例
+        vol_score = vol_ratio.clip(-2, 2) * 0.25  # 2倍量 -> 0.5
+    else:
+        vol_score = pd.Series(0, index=df.index)
+    
+    # 4. 组合得分 (加权平均)
+    # VIX 变化最能反映市场情绪，给更高权重
+    news_score = 0.5 * vix_score + 0.3 * momentum_score + 0.2 * vol_score
+    
+    # 最终裁剪到 -1 ~ 1
+    news_score = news_score.clip(-1, 1).fillna(0)
+    
+    return news_score
 
 def preprocess_data(df):
     print("Preprocessing data...")
@@ -275,46 +289,112 @@ def preprocess_data(df):
     df = df.sort_index()
     df = df.ffill().bfill()
     
-    # 1. 技术指标
+    # [核心修改: 消除滞后] 
+    # 强制让模型预测 "对数收益率" (Log Returns): ln(P_t / P_{t-1})
+    
+    # 1. 计算对数收益率
+    df['Log_Return'] = np.log(df['Oil_Close'] / df['Oil_Close'].shift(1))
+    df['Log_Return'] = df['Log_Return'].fillna(0) # 第一天为0
+
+    # 2. 技术指标
     close = df['Oil_Close']
     
-    # 简单移动平均 (SMA)
+    # Simple Moving Average
     df['SMA_5'] = close.rolling(window=5).mean()
     df['SMA_20'] = close.rolling(window=20).mean()
     
-    # RSI (相对强弱指数)
+    # [优化] 添加更多动量/变化敏感指标
+    # 价格变化率 (Rate of Change) - 5日
+    df['ROC_5'] = (close - close.shift(5)) / (close.shift(5) + 1e-10) * 100
+    
+    # 动量 (Momentum) - 10日
+    df['Momentum_10'] = close - close.shift(10)
+    
+    # 短期波动率 (5日标准差)
+    df['Volatility_5'] = close.rolling(window=5).std()
+    
+    # 价格相对于均线的偏离度 (帮助捕捉均值回归)
+    df['Price_SMA5_Ratio'] = close / (df['SMA_5'] + 1e-10) - 1
+    df['Price_SMA20_Ratio'] = close / (df['SMA_20'] + 1e-10) - 1
+    
+    # RSI
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD (指数平滑异同移动平均线)
+    # MACD 
     exp1 = close.ewm(span=12, adjust=False).mean()
     exp2 = close.ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']  # MACD 柱状图
     
-    # 布林带 (Bollinger Bands)
+    # Bollinger Bands
     roll_mean = close.rolling(window=20).mean()
     roll_std = close.rolling(window=20).std()
     df['Bollinger_Upper'] = roll_mean + (2 * roll_std)
     df['Bollinger_Lower'] = roll_mean - (2 * roll_std)
+    # Bollinger %B (价格在布林带中的位置)
+    df['Bollinger_PctB'] = (close - df['Bollinger_Lower']) / (df['Bollinger_Upper'] - df['Bollinger_Lower'] + 1e-10)
     
-    # 2. 新闻影响因子 (-1 到 1)
-    df['News_Impact'] = calculate_news_impact_score(df)
+    df = df.ffill().bfill()
+
+    # 3. [重要] 定义 Target (预测目标)
+    # Target(t) = Log_Return(t+PREDICT_STEPS)
+    df['Target_Return'] = df['Log_Return'].shift(-config.PREDICT_STEPS)
     
-    # 3. 创建训练目标标签 (次日收盘价)
+    # 保留 Target_Price 用于评估
     df['Target_Price'] = df['Oil_Close'].shift(-config.PREDICT_STEPS)
     
-    # 4. 波动率目标 (次日高低差)
-    next_high = df['Oil_High'].shift(-config.PREDICT_STEPS)
-    next_low = df['Oil_Low'].shift(-config.PREDICT_STEPS)
-    df['Target_Volatility'] = next_high - next_low
+    # 移除最后 N 行
+    df = df.iloc[:-config.PREDICT_STEPS]
     
-    # 删除因移动/滞后或指标计算产生的 NaN
-    df = df.dropna()
+    # 4. 新闻影响因子 (-1 到 1)
+    df['News_Impact'] = calculate_news_impact_score(df)
     
-    return df
+    # 5. 选择特征列
+    # [优化] 加入更多动量和变化敏感特征
+    feature_cols = [
+        'Oil_Close', 'Oil_Volume', 
+        'SMA_5', 'SMA_20', 
+        'ROC_5', 'Momentum_10', 'Volatility_5',  # 动量指标
+        'Price_SMA5_Ratio', 'Price_SMA20_Ratio',  # 偏离度
+        'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist',  # MACD 全家族
+        'Bollinger_Upper', 'Bollinger_Lower', 'Bollinger_PctB',  # 布林带
+        'Log_Return', 'News_Impact'
+    ]
+    
+    # 添加外部因子
+    for t in config.TICKERS_FACTORS:
+        col = f"{t}_Close"
+        if col in df.columns:
+            feature_cols.append(col)
+        else:
+            # 如果配置里有但数据里没有，补个0? 
+            pass
+            
+    # 重新整理
+    # 计算 Target_Volatility (High - Low)
+    # 如果 High/Low 不存在，用 ATR (rolling std) 代替
+    if 'Oil_High' in df.columns and 'Oil_Low' in df.columns:
+        # Volatility for the target day
+        vol = df['Oil_High'] - df['Oil_Low']
+        df['Target_Volatility'] = vol.shift(-config.PREDICT_STEPS)
+    else:
+        # Simple Proxy
+        df['Target_Volatility'] = df['Log_Return'].rolling(5).std().shift(-config.PREDICT_STEPS)
+        
+    df_final = df[feature_cols + ['Target_Return', 'Target_Price', 'Target_Volatility']].copy()
+    
+    if config.REMOVE_EXTREME_OUTLIERS:
+         df_final = df_final[df_final['Oil_Close'] > 0]
+         
+    # 再次去除 NaN 的行
+    df_final = df_final.dropna()
+         
+    return df_final
 
 def get_processed_data():
     os.makedirs("data", exist_ok=True)
@@ -324,11 +404,15 @@ def get_processed_data():
         print(f"Checking cache: {config.DATA_CACHE_PATH}")
         try:
             df = pd.read_csv(config.DATA_CACHE_PATH, index_col=0, parse_dates=True)
-            if len(df) > 50: # 简单的有效性检查
+            # [核心检查] 验证缓存是否包含最新的目标列
+            required_cols = ["Target_Return", "Target_Volatility"]
+            missing = [c for c in required_cols if c not in df.columns]
+            
+            if len(df) > 50 and not missing: 
                 print("Cache is valid.")
                 load_from_cache = True
             else:
-                print("Cache file is too small or empty. Ignoring.")
+                print(f"Cache is outdated (Missing: {missing}) or too small. Regenerating...")
         except:
             print("Cache file is corrupt. Ignoring.")
             

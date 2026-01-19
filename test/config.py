@@ -22,24 +22,29 @@ class Config:
     TICKERS_FACTORS = ["^GSPC", "DX-Y.NYB", "^VIX", "GC=F"]
     
     # 特征工程
-    SEQ_LENGTH = 60    # 序列长度：回看过去 60 天的数据进行预测
+    SEQ_LENGTH = 30    # [优化] 缩短序列，让模型更关注近期数据
     PREDICT_STEPS = 1  # 预测步长：预测未来 1 天
     
     # 模型参数
-    MODEL_TYPE = "AttentionBiGRU" 
+    MODEL_TYPE = "Transformer" 
     INPUT_DIM = 12     # 会自动覆盖
     HIDDEN_DIM = 128   # 隐藏层维度
-    NUM_LAYERS = 2     # GRU 层数
-    OUTPUT_DIM = 3
-    DROPOUT = 0.4      # 随机失活率（防止过拟合）
+    NUM_LAYERS = 3     # Transformer 层数
+    NHEAD = 8          # 注意力头数
+    DROPOUT = 0.15     # [优化] 进一步降低 Dropout，提高敏感度
     
-    # 训练参数
-    BATCH_SIZE = 32    # 批次大小
-    EPOCHS = 100
-    LEARNING_RATE = 0.0001 # 初始学习率
-    PATIENCE = 15      # 早停机制 (Early Stopping)
+    # 训练超参数
+    BATCH_SIZE = 64    # [优化] 更大批次
+    LR = 0.0005        # [优化] 提高学习率 (5e-4)
+    EPOCHS = 200
+    PATIENCE = 25      # 提前停止容忍度
+    WEIGHT_DECAY = 1e-5 # [优化] 极低正则化
     
-    # 路径
+    # 爬虫/新闻配置
+    USE_EXISTING_NEWS = True # True: 优先读取 crawled_news.json; False: 强制重新联网抓取
+    SEARCH_ENGINE = "DuckDuckGo" # or "GoogleNews" (需安装库)
+    
+    # 模型保存路径
     MODEL_PATH = "best_oil_price_model.pth"
     DATA_CACHE_PATH = "data/oil_data_merged.csv"
 
