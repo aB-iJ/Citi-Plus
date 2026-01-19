@@ -144,13 +144,17 @@ class NewsCrawler:
 
         # 2. 读取现有数据
         news_data = {}
-        if os.path.exists(output_file):
-            try:
-                with open(output_file, "r", encoding='utf-8') as f:
-                    news_data = json.load(f)
-            except:
-                print("Read JSON failed, starting fresh.")
-                news_data = {}
+        # [修改] 如果 USE_EXISTING_NEWS 为 False，直接重新生成，不读取本地文件以实现强制刷新
+        if hasattr(config, 'USE_EXISTING_NEWS') and config.USE_EXISTING_NEWS:
+            if os.path.exists(output_file):
+                try:
+                    with open(output_file, "r", encoding='utf-8') as f:
+                        news_data = json.load(f)
+                except:
+                    print("Read JSON failed, starting fresh.")
+                    news_data = {}
+        else:
+            print(f"[NewsCrawler] USE_EXISTING_NEWS=False. Forcefully regenerating {output_file}...")
         
         # 3. 生成日期列表 (从今天倒推 n 天)
         target_dates = []

@@ -22,7 +22,7 @@ class Config:
     TICKERS_FACTORS = ["^GSPC", "DX-Y.NYB", "^VIX", "GC=F"]
     
     # 特征工程
-    SEQ_LENGTH = 30    # [优化] 缩短序列，让模型更关注近期数据
+    SEQ_LENGTH = 10    # [优化] 大幅缩短序列 (30->10) 以减少历史数据的"拖拽"效应，只看最近两周
     PREDICT_STEPS = 1  # 预测步长：预测未来 1 天
     
     # 模型参数
@@ -31,17 +31,17 @@ class Config:
     HIDDEN_DIM = 128   # 隐藏层维度
     NUM_LAYERS = 3     # Transformer 层数
     NHEAD = 8          # 注意力头数
-    DROPOUT = 0.15     # [优化] 进一步降低 Dropout，提高敏感度
+    DROPOUT = 0.1      # [优化] 进一步降低 Dropout (0.15 -> 0.1)，减少正则化以让模型更大胆预测
     
     # 训练超参数
-    BATCH_SIZE = 64    # [优化] 更大批次
-    LR = 0.0005        # [优化] 提高学习率 (5e-4)
+    BATCH_SIZE = 8     # [优化] 极小批次 (16->8) 以最大化梯度随机性，强迫模型拟合高频变化
+    LR = 0.0005        # [优化] 提高学习率 (5e-4) -> 保持
     EPOCHS = 200
     PATIENCE = 25      # 提前停止容忍度
     WEIGHT_DECAY = 1e-5 # [优化] 极低正则化
     
     # 爬虫/新闻配置
-    USE_EXISTING_NEWS = True # True: 优先读取 crawled_news.json; False: 强制重新联网抓取
+    USE_EXISTING_NEWS = True # [恢复] 默认开启新闻缓存，避免频繁联网抓取/API消耗
     SEARCH_ENGINE = "DuckDuckGo" # or "GoogleNews" (需安装库)
     
     # 模型保存路径

@@ -51,7 +51,8 @@ def train():
     # 1. 加载数据
     df = get_processed_data()
     
-    feature_cols = [c for c in df.columns if "Target_" not in c]
+    # [修复] 显式排除 Oil_Close，因为它只用于评估，不是特征
+    feature_cols = [c for c in df.columns if "Target_" not in c and c != "Oil_Close"]
     # [核心修正] 训练目标变更为 Target_Return (对数收益率) 和 Target_Volatility
     # Target_Price 仅用于评估，不参与训练缩放
     target_cols_train = ["Target_Return", "Target_Volatility"] 
@@ -65,9 +66,10 @@ def train():
     
     # 归一化特征
     data_scaled = scaler.fit_transform(df_features)
-    # 归一化目标值
+    # 归一化目标值 (注意: 如果 LogReturn 均值不为0，会破坏符号方向性，但通常日收益率均值接近0)
     scaler_target = StandardScaler()
     target_scaled = scaler_target.fit_transform(df_targets) # 只包含 Return 和 Vol
+    print(f"Target Scaler Mean (Return): {scaler_target.mean_[0]:.6f} (Should be close to 0)")
     
     # 保存 Scalers 以便后续推理使用
     os.makedirs("models", exist_ok=True)
@@ -157,23 +159,17 @@ def train():
             overestimate_penalty = torch.relu(pred_magnitude - target_magnitude) * 0.5
             loss_sensitivity = (underestimate_penalty + overestimate_penalty).mean()
             
-            # 6. [新增] 趋势一致性损失 - 惩罚与近期趋势矛盾的预测
-            # 计算输入序列中最近5天的平均收益率方向
-            recent_returns = bx[:, -5:, 0]  # 假设第0列是 Oil_Close
-            recent_trend = (recent_returns[:, -1] - recent_returns[:, 0]).sign().unsqueeze(1)
-            pred_sign = pred_return.sign()
-            # 如果预测方向与近期趋势一致，损失为0；否则产生小惩罚
-            # 注意：这个权重要小，因为趋势反转也是合理的
-            trend_conflict = torch.relu(-recent_trend * pred_sign) * 0.1
-            loss_trend = trend_conflict.mean()
+            # 6. [优化] 移除强制趋势一致性损失 (这会导致模型盲目跟随过去趋势，即"滞后性")
+            # 改为增强的方向性惩罚
             
-            # 综合损失 (重点提高幅度和敏感度权重)
+            # 综合损失
+            # 增加 direction_loss 的权重，强迫模型学习领先指标
             loss = (loss_mse 
-                    + 2.0 * loss_dir 
+                    + 5.0 * loss_dir      # [Changed] 2.0 -> 5.0 增加方向准确性权重
                     + 0.1 * loss_v 
                     + 3.0 * loss_magnitude 
                     + 2.0 * loss_sensitivity
-                    + 0.5 * loss_trend)
+                    )
             
             loss.backward()
             
@@ -191,16 +187,23 @@ def train():
         # --- 验证阶段 ---
         model.eval()
         total_val_loss = 0
+        val_pred_mag_sum = 0
+        val_target_mag_sum = 0
+        val_correct_dir_sum = 0
+        val_total_samples = 0
+        
         with torch.no_grad():
              for bx, by in val_loader:
                 target_return = by[:, 0].unsqueeze(1)
+                target_vol = by[:, 1].unsqueeze(1)
                 
-                pred_return, log_var, _, _ = model(bx)
+                pred_return, log_var, pred_vol, _ = model(bx)
                 
+                # 损失计算
                 loss_mse = nn.MSELoss()(pred_return, target_return)
                 loss_dir = direction_loss(pred_return, target_return)
+                loss_v = nn.MSELoss()(pred_vol, target_vol)
                 
-                # 验证损失与训练保持一致
                 pred_magnitude = torch.abs(pred_return)
                 target_magnitude = torch.abs(target_return)
                 loss_magnitude = nn.MSELoss()(pred_magnitude, target_magnitude)
@@ -209,33 +212,41 @@ def train():
                 overestimate_penalty = torch.relu(pred_magnitude - target_magnitude) * 0.5
                 loss_sensitivity = (underestimate_penalty + overestimate_penalty).mean()
                 
-                val_loss = loss_mse + 2.0 * loss_dir + 3.0 * loss_magnitude + 2.0 * loss_sensitivity
+                val_loss = loss_mse + 5.0 * loss_dir + 0.1 * loss_v + 3.0 * loss_magnitude + 2.0 * loss_sensitivity
                 
                 total_val_loss += val_loss.item()
                 
+                # 统计指标 accumulators
+                val_pred_mag_sum += pred_magnitude.sum().item()
+                val_target_mag_sum += target_magnitude.sum().item()
+                
+                # 方向准确率 (Batch级)
+                # 严格准确率：如果预测为0 (极少见但可能)，算错
+                pred_sign = torch.sign(pred_return)
+                target_sign = torch.sign(target_return)
+                # 修正: sign(0) = 0. 平局算错.
+                correct = (pred_sign == target_sign) & (target_sign != 0)
+                val_correct_dir_sum += correct.float().sum().item()
+                val_total_samples += target_return.size(0)
+                
         avg_val_loss = total_val_loss / len(val_loader)
         
-        # [新增] 计算更多诊断指标
-        model.eval()
+        # 计算全局平均指标
+        avg_pred_mag = val_pred_mag_sum / val_total_samples
+        avg_target_mag = val_target_mag_sum / val_total_samples
+        avg_dir_acc = val_correct_dir_sum / val_total_samples
+        
+        # [诊断] 打印第一个 Batch 的前5个预测值，检查是否"死值"
+        sample_x, sample_y = next(iter(val_loader))
         with torch.no_grad():
-            # 在验证集上采样一个批次，计算预测的平均变化幅度
-            sample_x, sample_y = next(iter(val_loader))
-            sample_pred, _, _, _ = model(sample_x)
-            
-            # 预测变化的平均绝对值 (检测是否预测"几乎不变")
-            pred_change_mag = torch.abs(sample_pred[:, 0]).mean().item()
-            target_change_mag = torch.abs(sample_y[:, 0]).mean().item()
-            
-            # 方向准确率
-            pred_sign = torch.sign(sample_pred[:, 0])
-            target_sign = torch.sign(sample_y[:, 0])
-            direction_acc = (pred_sign == target_sign).float().mean().item()
+            s_pred, _, _, _ = model(sample_x)
+            print(f"\n[Debug] Sample Preds: {s_pred[:5, 0].cpu().numpy().round(4)} vs Targets: {sample_y[:5, 0].cpu().numpy().round(4)}")
         
         # 学习率调整 (基于验证Loss)
         scheduler.step(avg_val_loss)
         
         print(f"Epoch {epoch+1}: Train={avg_train_loss:.6f} | Val={avg_val_loss:.6f} | "
-              f"PredMag={pred_change_mag:.4f} | TgtMag={target_change_mag:.4f} | DirAcc={direction_acc:.2%}", end=" ")
+              f"PredMag={avg_pred_mag:.4f} | TgtMag={avg_target_mag:.4f} | DirAcc={avg_dir_acc:.2%}", end=" ")
         
         # 早停检查
         if avg_val_loss < best_val_loss:

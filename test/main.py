@@ -159,11 +159,35 @@ def evaluate_and_plot_history(days_to_plot=200):
     # 绘图
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
     
+    # [诊断] 计算滞后性相关指标
+    # 1. 原始预测的相关性
+    import scipy.stats
+    if len(preds) > 5:
+        corr_raw, _ = scipy.stats.pearsonr(preds, actual)
+        # 2. 假设滞后1天的相关性 (Shift -1)
+        # 这种比较方式是: 今天的预测 vs 昨天的真实价格
+        # 如果这个相关性比原始的高，说明模型在"抄昨天的作业"
+        corr_lag_check, _ = scipy.stats.pearsonr(preds[1:], actual[:-1])
+        
+        print(f"\n[Lag Diagnosis] Correlation(Raw): {corr_raw:.4f}")
+        print(f"[Lag Diagnosis] Correlation(if Lagged): {corr_lag_check:.4f}")
+        if corr_lag_check > corr_raw:
+             print("⚠️ 警告: 模型表现出明显的滞后性。它与'昨天的价格'相关性更高！")
+    
     # 1. 价格 & 范围
-    ax1.plot(dates, actual, label="Actual Oil Price (真实油价)", color="black", linewidth=2)
-    ax1.plot(dates, preds, label="AI Predicted Price (AI预测油价)", color="royalblue", linestyle="--")
-    ax1.fill_between(dates, lower, upper, color="royalblue", alpha=0.2, label="Predicted Context (预测置信区间)")
-    ax1.set_title("Oil Price Prediction vs Actual (Hybrid Transformer-LSTM)", fontsize=14)
+    ax1.plot(dates, actual, label="Actual Oil Price", color="black", linewidth=2, alpha=0.8)
+    ax1.plot(dates, preds, label="AI Prediction", color="royalblue", linestyle="--", linewidth=1.5)
+    
+    # 添加一个 "前一日收盘价" 作为基准线 (Naive Baseline)
+    # 只有当前一日基准线也被滞后时，才能说明是数据本身的惯性
+    naive_baseline = [df.loc[d, 'Oil_Close'] for d in dates] # 这其实就是 actual，得 shift
+    # 真正的 Naive Forecast: 明天的价格 = 今天价格
+    # 所以画在 Date T 的 Naive 预测点，数值等于 Price T-1
+    naive_preds = [df.iloc[df.index.get_loc(d)-1]['Oil_Close'] for d in dates]
+    ax1.plot(dates, naive_preds, label="Naive Baseline (Extrapolation)", color="gray", linestyle=":", alpha=0.5)
+
+    ax1.fill_between(dates, lower, upper, color="royalblue", alpha=0.15, label="Confidence Interval")
+    ax1.set_title("Oil Price Prediction Analysis (Lag Diagnosis)", fontsize=14)
     ax1.set_ylabel("Price (USD)")
     ax1.legend(loc="upper left")
     ax1.grid(True, alpha=0.3)
@@ -311,14 +335,8 @@ def validate_model_performance():
                 
                 # 2. 还原为绝对价格
                 # Price(t) = Price(t-1) * exp(Log_Return)
-                # 获取当天的收盘价 (作为基准) - 也就是 input sequence 的最后一个点的收盘价
-                # 注意 seq_raw 是原始特征值，我们需要找到 'Oil_Close' 所在的列
-                if 'Oil_Close' in feature_names:
-                     close_idx = list(feature_names).index('Oil_Close')
-                     last_close_price = seq_raw[-1, close_idx]
-                else:
-                     # Fallback (不应该发生)
-                     last_close_price = 1.0 
+                # [修复] 即使 'Oil_Close' 不在 feature_names 中，也从原始 df 获取上一日收盘价
+                last_close_price = df.iloc[i-1]['Oil_Close']
                      
                 final_price = last_close_price * np.exp(real_log_return)
                 
@@ -474,11 +492,8 @@ def predict_tomorrow(api_key=None):
             # 反归一化 Return (scaler_t 拟合的是 [Target_Return, Target_Volatility])
             real_return = scaler_t.inverse_transform([[ret_val, 0]])[0][0]
             
-            # 获取昨日收盘价 (序列最后一天的 Oil_Close)
-            if 'Oil_Close' in feature_names:
-                last_close = last_sequence_df.iloc[-1]['Oil_Close']
-            else:
-                last_close = last_sequence_df.iloc[-1, 0]  # fallback
+            # 获取昨日收盘价 (由于 Oil_Close 不在特征中，必须从原始 df 的最后一行获取)
+            last_close = df.iloc[-1]['Oil_Close']
             
             # 还原预测价格: P_tomorrow = P_today * exp(predicted_return)
             price = last_close * np.exp(real_return)
@@ -616,11 +631,8 @@ if __name__ == "__main__":
                 p_ret_val = pred_ret.cpu().item()
                 real_ret = scaler_t.inverse_transform([[p_ret_val, 0]])[0][0]
                 
-                # 获取昨收 (序列最后一天，即 df[i-1])
-                if 'Oil_Close' in features:
-                     last_close_price = seq_raw[-1, list(features).index('Oil_Close')]
-                else: 
-                     last_close_price = df.iloc[i-1]['Oil_Close']
+                # [修复] 即使 'Oil_Close' 不在 features 中，也从原始 df 获取上一日收盘价
+                last_close_price = df.iloc[i-1]['Oil_Close']
                 
                 # 预测今天 (df[i]) 的价格
                 price = last_close_price * np.exp(real_ret)

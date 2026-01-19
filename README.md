@@ -38,3 +38,9 @@
 ## 2026.01.19 21:02 , 李桂聿 - 将`Citi_Plus/README.md`重命名为`History.md`，优化了`.md`文件的代码
 - `Citi-Plus/History.md`
 - `Citi-Plus/test/README.md`
+
+## 2026.01.19 23:14 , 李桂聿 - 将`Citi_Plus/History.md`重命名为`README.md`，优化了缓存逻辑，极少的使用缓存
+- 出于对GitHub首页展示信息的规则的考虑，将`Citi-Plus/History.md`重命名为README.md
+- `Citi-Plus\test\data\oil_data_merged.csv`将在每次运行`Citi_Team\Citi-Plus\test\main.py`时重新生成
+- 取消了图片`Citi_Team\Citi-Plus\test\oil_price_prediction_full.png`生成所需要数据的缓存机制，防止图片不更新
+- 尽力尝试解决了模型滞后性的问题但仍然有严重的滞后性

@@ -304,42 +304,63 @@ def preprocess_data(df):
     df['SMA_20'] = close.rolling(window=20).mean()
     
     # [优化] 添加更多动量/变化敏感指标
-    # 价格变化率 (Rate of Change) - 5日
-    df['ROC_5'] = (close - close.shift(5)) / (close.shift(5) + 1e-10) * 100
     
-    # 动量 (Momentum) - 10日
-    df['Momentum_10'] = close - close.shift(10)
+    # [新增] 极速动量 (Velocity & Acceleration)
+    # 滞后性修复核心：引入二阶差分 (加速度)，这通常是价格变化的领先指标
+    df['Velocity'] = df['Log_Return'] # 一阶 (速度)
+    df['Acceleration'] = df['Log_Return'] - df['Log_Return'].shift(1) # 二阶 (加速度)
     
-    # 短期波动率 (5日标准差)
-    df['Volatility_5'] = close.rolling(window=5).std()
+    # 价格变化率 (Rate of Change) - 5日 -> 改为更短的 3日，提高敏感度
+    df['ROC_3'] = (close - close.shift(3)) / (close.shift(3) + 1e-10) * 100
     
-    # 价格相对于均线的偏离度 (帮助捕捉均值回归)
+    # 动量 RSI - 缩短周期 10 -> 6
+    df['Momentum_6_RSI'] = ta.momentum.RSIIndicator(close, window=6).rsi() 
+    
+    # 短期波动率 (5日标准差) -> 标准化: Vol / Close
+    df['Volatility_5'] = close.rolling(window=5).std() / (close + 1e-10)
+    
+    # 价格均线偏离度 (保留短期5日，移除相对滞后的20日作为主特征)
     df['Price_SMA5_Ratio'] = close / (df['SMA_5'] + 1e-10) - 1
-    df['Price_SMA20_Ratio'] = close / (df['SMA_20'] + 1e-10) - 1
+    # df['Price_SMA20_Ratio'] = close / (df['SMA_20'] + 1e-10) - 1 # 禁用长周期
     
-    # RSI
+    # RSI - 缩短周期 14 -> 6 (快速 RSI)
+    # Fast RSI reacts much faster to price reversals
     delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=6).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=6).mean()
     rs = gain / (loss + 1e-10)
-    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI_6'] = 100 - (100 / (1 + rs))
     
-    # MACD 
-    exp1 = close.ewm(span=12, adjust=False).mean()
-    exp2 = close.ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']  # MACD 柱状图
+    # MACD -> 标准化 MACD / Close
+    # 使用更快的参数 (6, 13, 5) 替代标准的 (12, 26, 9)
+    exp1 = close.ewm(span=6, adjust=False).mean()
+    exp2 = close.ewm(span=13, adjust=False).mean()
+    macd_raw = exp1 - exp2
+    df['MACD_Norm'] = macd_raw / (close + 1e-10)
+    
+    macd_signal = macd_raw.ewm(span=5, adjust=False).mean()
+    df['MACD_Signal_Norm'] = macd_signal / (close + 1e-10)
+    
+    df['MACD_Hist_Norm'] = df['MACD_Norm'] - df['MACD_Signal_Norm']
+
     
     # Bollinger Bands
     roll_mean = close.rolling(window=20).mean()
     roll_std = close.rolling(window=20).std()
     df['Bollinger_Upper'] = roll_mean + (2 * roll_std)
     df['Bollinger_Lower'] = roll_mean - (2 * roll_std)
-    # Bollinger %B (价格在布林带中的位置)
+    # Bollinger %B (价格在布林带中的位置) - 这是一个很好的归一化指标
     df['Bollinger_PctB'] = (close - df['Bollinger_Lower']) / (df['Bollinger_Upper'] - df['Bollinger_Lower'] + 1e-10)
     
+    # Volume 归一化: Vol / SMA_Vol_20
+    if 'Oil_Volume' in df.columns:
+         vol_sma = df['Oil_Volume'].rolling(window=20).mean()
+         df['Volume_Ratio'] = df['Oil_Volume'] / (vol_sma + 1e-10)
+    else:
+         df['Volume_Ratio'] = 0
+
     df = df.ffill().bfill()
+
 
     # 3. [重要] 定义 Target (预测目标)
     # Target(t) = Log_Return(t+PREDICT_STEPS)
@@ -355,25 +376,35 @@ def preprocess_data(df):
     df['News_Impact'] = calculate_news_impact_score(df)
     
     # 5. 选择特征列
-    # [优化] 加入更多动量和变化敏感特征
+    # [优化] 仅保留平稳特征 (Stationary Features)，移除原始价格 (Raw Prices) 以消除滞后性
     feature_cols = [
-        'Oil_Close', 'Oil_Volume', 
-        'SMA_5', 'SMA_20', 
-        'ROC_5', 'Momentum_10', 'Volatility_5',  # 动量指标
-        'Price_SMA5_Ratio', 'Price_SMA20_Ratio',  # 偏离度
-        'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist',  # MACD 全家族
-        'Bollinger_Upper', 'Bollinger_Lower', 'Bollinger_PctB',  # 布林带
-        'Log_Return', 'News_Impact'
+        'Log_Return',           # 速度 (V)
+        'Acceleration',         # 加速度 (A) - 关键领先指标
+        'Volume_Ratio',         # 相对成交量
+        'ROC_3',                # 快速变化率
+        'Momentum_6_RSI',       # 快速 RSI 动量
+        'Volatility_5',         # 相对波动率
+        'Price_SMA5_Ratio',     # 短期乖离率
+        'RSI_6',                # 快速 RSI
+        'MACD_Norm',            # 快速 MACD
+        'MACD_Hist_Norm',       # 快速 MACD 柱
+        'Bollinger_PctB',       # 布林位置
+        'News_Impact'           # 新闻
     ]
     
-    # 添加外部因子
+    # 添加外部因子 - 必须转换为收益率或相对值
+    feature_cols_extra = []
     for t in config.TICKERS_FACTORS:
         col = f"{t}_Close"
         if col in df.columns:
-            feature_cols.append(col)
-        else:
-            # 如果配置里有但数据里没有，补个0? 
-            pass
+            # 自动转换为 Log Return
+            ret_col = f"{col}_LogRet"
+            df[ret_col] = np.log(df[col] / df[col].shift(1))
+            df[ret_col] = df[ret_col].fillna(0)
+            feature_cols_extra.append(ret_col)
+    
+    feature_cols.extend(feature_cols_extra)
+
             
     # 重新整理
     # 计算 Target_Volatility (High - Low)
@@ -385,8 +416,9 @@ def preprocess_data(df):
     else:
         # Simple Proxy
         df['Target_Volatility'] = df['Log_Return'].rolling(5).std().shift(-config.PREDICT_STEPS)
-        
-    df_final = df[feature_cols + ['Target_Return', 'Target_Price', 'Target_Volatility']].copy()
+    
+    # [修复] 必须保留 Oil_Close 用于后续评估和过滤，即使不作为特征
+    df_final = df[feature_cols + ['Target_Return', 'Target_Price', 'Target_Volatility', 'Oil_Close']].copy()
     
     if config.REMOVE_EXTREME_OUTLIERS:
          df_final = df_final[df_final['Oil_Close'] > 0]
@@ -398,40 +430,24 @@ def preprocess_data(df):
 
 def get_processed_data():
     os.makedirs("data", exist_ok=True)
+    # [修改] 强制每次重新生成数据，不再使用缓存读取，以确保特征工程的修改立即可见
     load_from_cache = False
     
-    if os.path.exists(config.DATA_CACHE_PATH):
-        print(f"Checking cache: {config.DATA_CACHE_PATH}")
-        try:
-            df = pd.read_csv(config.DATA_CACHE_PATH, index_col=0, parse_dates=True)
-            # [核心检查] 验证缓存是否包含最新的目标列
-            required_cols = ["Target_Return", "Target_Volatility"]
-            missing = [c for c in required_cols if c not in df.columns]
-            
-            if len(df) > 50 and not missing: 
-                print("Cache is valid.")
-                load_from_cache = True
-            else:
-                print(f"Cache is outdated (Missing: {missing}) or too small. Regenerating...")
-        except:
-            print("Cache file is corrupt. Ignoring.")
-            
-    if not load_from_cache:
-        # 优先级 1: 本地文件
-        df = load_from_local_files()
+    # 优先级 1: 本地文件
+    df = load_from_local_files()
         
-        # 优先级 2: API (如果没有本地文件)
-        if df is None or len(df) == 0:
-             print("No local files found. Attempting YFinance download...")
-             df = fetch_yfinance_data()
+    # 优先级 2: API (如果没有本地文件)
+    if df is None or len(df) == 0:
+        print("No local files found. Attempting YFinance download...")
+        df = fetch_yfinance_data()
 
-        if df is not None and len(df) > 0:
-            df = preprocess_data(df)
-            print(f"Saving data to cache: {config.DATA_CACHE_PATH}")
-            df.to_csv(config.DATA_CACHE_PATH)
-        else:
-            print("Error: Could not obtain data from Local Files or YFinance.")
-            return None
+    if df is not None and len(df) > 0:
+        df = preprocess_data(df)
+        print(f"Saving data to cache: {config.DATA_CACHE_PATH}")
+        df.to_csv(config.DATA_CACHE_PATH)
+    else:
+        print("Error: Could not obtain data from Local Files or YFinance.")
+        return None
         
     return df
 
