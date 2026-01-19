@@ -1,14 +1,14 @@
 # Citi-Plus
 
-## 2026.01.19 02:35 , 李桂聿 - 添加了test文件夹 和 .gitignore文件
-- Citi-Plus/test/README.md文件描述了对于整个项目的想法、当前已完成的部分、遇到的问题 和 当前模型的部署方法
-- Citi-Plus/test/README_ENV.md文件详细给出了配置环境所需要的所有步骤（前提是你安装了conda）
-- Citi-Plus/.gitignore文件规定了不需要git追踪的文件/文件夹，以后对这些文件/文件夹所做的所有更改不会被git跟踪，也不会被push到GitHub里。
+## 2026.01.19 02:35 , 李桂聿 - 添加了`Citi_Plus/test`文件夹 和 `.gitignore`文件
+- `Citi-Plus/test/README.md`文件描述了对于整个项目的想法、当前已完成的部分、遇到的问题 和 当前模型的部署方法
+- `Citi-Plus/test/README_ENV.md`文件详细给出了配置环境所需要的所有步骤（前提是你安装了conda）
+- `Citi-Plus/.gitignore`文件规定了不需要git追踪的文件/文件夹，以后对这些文件/文件夹所做的所有更改不会被Git跟踪，也不会被push到GitHub里。
 > [!CAUTION]
-> **请不要随便删除/修改/移动 Citi-Plus/.gitignore ，否则整个虚拟环境和缓存文件夹都将被git跟踪，轻易无法删除！**
+> **请不要随便删除/修改/移动 `Citi-Plus/.gitignore` ，否则整个虚拟环境和缓存文件夹都将被git跟踪，轻易无法删除！**
 
-## 2026.01.19 03:45 , 李桂聿 - 更改了.gitignore文件使git跟踪 *.csv 数据文件
-- `Citi-Plus/.gitignore`文件里删除了 `*.csv`，使git跟踪 `*.csv` 文件
+## 2026.01.19 03:45 , 李桂聿 - 更改了`.gitignore`文件使git跟踪`*.csv`数据文件
+- `Citi-Plus/.gitignore`文件里删除了`*.csv`，使git跟踪 `*.csv` 文件
 - `Citi-Plus/test/input_data`下的五个csv文件被跟踪
 - `Citi-Plus/test/data`下的一个csv文件被跟踪
 
@@ -22,7 +22,7 @@
 - **升级**: 引入了混合模型架构 (Transformer + LSTM + CNN)，增加了时间注意力机制。
 - **功能**: 更新了 `news_agent.py`，支持使用 DuckDuckGo 搜索 `investing.com` 的历史新闻。
 - **文档**: 更新了 `test/README.md` 并汉化了部分核心代码注释。
-- **git配置** :删除了 `*.pkl`,/Citi-Plus/test/model下的三个`.pkl`文件被跟踪
+- **git配置** :删除了 `*.pkl`,`Citi-Plus/test/model`下的三个`.pkl`文件被跟踪
 > [!WARNING]
 > 由于特征工程逻辑变更，请务必删除 `test/data` 下的缓存文件并重新训练模型！
 
@@ -34,3 +34,7 @@
 > ```powershell
 > $env:DeepSeek_API = "sk-xxxxxxxx"
 > ```
+
+## 2026.01.19 21:02 , 李桂聿 - 将`Citi_Plus/README.md`重命名为`History.md`，优化了`.md`文件的代码
+- `Citi-Plus/History.md`
+- `Citi-Plus/test/README.md`

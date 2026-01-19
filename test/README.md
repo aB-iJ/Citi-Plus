@@ -24,28 +24,28 @@
 - 模型架构升级为多尺度卷积 + 时间注意力机制，解决了预测滞后问题。
 - 新闻爬虫已通过测试 (DuckDuckGo + Investing.com)。
 
-## 目录结构
+## 目录结构（`Citi_Plus/test`文件夹下）
 
-*   `README_ENV.md`: 配置所需的运行环境的详细教程（使用conda）
-*   `config.py`: 项目的全局配置文件，包含所有参数设置。
-*   `data_loader.py`: 负责数据的读取、清洗、API下载（如 Yahoo Finance）、技术指标计算等特征工程。
-*   `train.py`: 训练脚本，定义了模型训练循环、损失函数 (MSE + 敏感度损失) 和早停机制。
-*   `main.py`: 推理与分析脚本，用于加载训练好的模型，在测试集上进行预测，并生成详细的分析图表。
-*   `model.py`: 定义神经网络结构 (`OilPriceTransformer`)。
-*   `news_agent.py`: **[新增]** 新闻爬虫与情感分析模块 (DuckDuckGo + DeepSeek API)。
-*   `utils.py`: 通用工具函数（如设备检测、随机种子设置）。
-*   `input_data/`: 存放本地 CSV 数据的文件夹。
-*   `models/`: 存放训练好的模型权重 (`.pth`) 和归一化器 (`.pkl`)。
-*   `data/`: 存放处理后的缓存数据。
+*   `./README_ENV.md`: 配置所需的运行环境的详细教程（使用conda）
+*   `./config.py`: 项目的全局配置文件，包含所有参数设置。
+*   `./data_loader.py`: 负责数据的读取、清洗、API下载（如 Yahoo Finance）、技术指标计算等特征工程。
+*   `./train.py`: 训练脚本，定义了模型训练循环、损失函数 (MSE + 敏感度损失) 和早停机制。
+*   `./main.py`: 推理与分析脚本，用于加载训练好的模型，在测试集上进行预测，并生成详细的分析图表。
+*   `./model.py`: 定义神经网络结构 (`OilPriceTransformer`)。
+*   `./news_agent.py`: **[新增]** 新闻爬虫与情感分析模块 (DuckDuckGo + DeepSeek API)。
+*   `./utils.py`: 通用工具函数（如设备检测、随机种子设置）。
+*   `./input_data/`: 存放本地 CSV 数据的文件夹。
+*   `./models/`: 存放训练好的模型权重 (`.pth`) 和归一化器 (`.pkl`)。
+*   `./data/`: 存放处理后的缓存数据。
 
 ## 使用方法
 
 ### 1. 准备数据
 
-您可以将历史数据 CSV 文件放入 `input_data` 文件夹（文件名如 `CL=F.csv`）。如果没有本地文件，程序会自动尝试从 Yahoo Finance 下载。
+您可以将历史数据 CSV 文件放入 `./input_data` 文件夹（文件名如 `CL=F.csv`）。如果没有本地文件，程序会自动尝试从 Yahoo Finance 下载。
 
 > [!WARNING]
-> 首次运行时，脚本会生成 `data/oil_data_merged.csv` 缓存。如果修改了特征工程逻辑，请务必手动删除该缓存文件以强制重新生成！
+> 首次运行时，脚本会生成 `./data/oil_data_merged.csv` 缓存。如果修改了特征工程逻辑，请务必手动删除该缓存文件以强制重新生成！
 
 ### 2. 训练模型
 
@@ -53,7 +53,7 @@
 ```powershell
 python train.py
 ```
-训练过程会自动保存验证集 Loss 最低的模型到 `models/best_oil_price_model.pth`。
+训练过程会自动保存验证集 Loss 最低的模型到 `./models/best_oil_price_model.pth`。
 
 ### 3.与新闻结合的推理
 
@@ -62,16 +62,16 @@ python train.py
 python main.py
 ```
 这将生成以下图片：
-*   `oil_price_prediction_full.png`: 仅展示**测试集**（未知数据）的预测结果，包含置信区间和置信度评分。
-*   `prediction_analysis.png`: 最近200天的详细回测图。
-*   `feature_importance.png`: 必须特征的重要性排行。
+*   `./oil_price_prediction_full.png`: 仅展示**测试集**（未知数据）的预测结果，包含置信区间和置信度评分。
+*   `./prediction_analysis.png`: 最近200天的详细回测图。
+*   `./feature_importance.png`: 必须特征的重要性排行。
 
 > [!TIP]
-> 如果想要测试实时新闻对预测的影响，请在 `news_agent.py` 中填入 DeepSeek API Key 并取消注释相关代码。
+> 如果想要测试实时新闻对预测的影响，请在 `./news_agent.py` 中填入 DeepSeek API Key 并取消注释相关代码。
 
 ## 参数详解 (config.py)
 
-您可以在 `config.py` 中修改以下重要参数来调整模型行为。
+您可以在 `./config.py` 中修改以下重要参数来调整模型行为。
 
 ### 数据相关 (`Data Related`)
 *   `START_DATE / END_DATE`: 设定训练和回测数据的时间范围。
