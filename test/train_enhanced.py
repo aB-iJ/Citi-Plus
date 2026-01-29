@@ -1,3 +1,6 @@
+"""
+增强版训练脚本 - 测试更复杂的模型是否能提升性能
+"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,9 +12,9 @@ import joblib
 from tqdm import tqdm
 import os
 
-from config import config
+from config_enhanced import config_enhanced as config
 from data_loader import get_processed_data
-from model import AttentionBiGRU
+from model_enhanced import EnhancedAttentionBiGRU
 from utils import get_device, set_seed
 
 def create_sequences(data, seq_length, target_cols):
@@ -25,7 +28,6 @@ def create_sequences(data, seq_length, target_cols):
         ys.append(y_label)
     return np.array(xs), np.array(ys)
 
-# Focal Loss - 处理类别不平衡
 def focal_loss(pred, target, gamma=2.0, alpha=0.25):
     bce = nn.BCELoss(reduction='none')(pred, target)
     pt = torch.where(target == 1, pred, 1 - pred)
@@ -36,11 +38,17 @@ def train():
     set_seed()
     device = get_device()
     print(f"Using device: {device}")
+    print(f"\n[增强模型配置]")
+    print(f"- 序列长度: {config.SEQ_LENGTH}")
+    print(f"- 隐藏维度: {config.HIDDEN_DIM}")
+    print(f"- GRU层数: {config.NUM_LAYERS}")
+    print(f"- 注意力头数: {config.NUM_HEADS}")
+    print(f"- Dropout: {config.DROPOUT}")
+    print(f"- 批次大小: {config.BATCH_SIZE}")
+    print(f"- 学习率: {config.LEARNING_RATE}")
     
-    # 1. 加载数据
     df = get_processed_data()
     
-    # 纯平稳特征
     stationary_cols = [
         'Dist_SMA_5', 'Dist_SMA_20', 
         'RSI', 'MACD', 
@@ -56,37 +64,30 @@ def train():
             stationary_cols.append(ret_col)
             
     feature_cols = [c for c in stationary_cols if c in df.columns]
-    
-    # [关键] 只保留分类目标
     target_cols = ["Target_Direction"]
     
-    print(f"Features (Count={len(feature_cols)}): {feature_cols}")
-    print(f"Target: {target_cols} (Pure Classification)")
+    print(f"\n特征数量: {len(feature_cols)}")
     
-    # Scaler - 只对特征做标准化，目标是0/1不需要
     scaler = StandardScaler()
     border_idx = int(len(df) * 0.8)
     train_df = df.iloc[:border_idx]
     
     scaler.fit(train_df[feature_cols])
     data_scaled = scaler.transform(df[feature_cols])
-    
-    # 目标不做标准化 (已经是 0/1)
     target_data = df[target_cols].values
     
     os.makedirs("models", exist_ok=True)
-    joblib.dump(scaler, "models/scaler_features.pkl")
-    joblib.dump(feature_cols, "models/feature_names.pkl")
+    joblib.dump(scaler, "models/scaler_features_enhanced.pkl")
+    joblib.dump(feature_cols, "models/feature_names_enhanced.pkl")
     
     combined_data = np.hstack([data_scaled, target_data])
     
     X, y = create_sequences(combined_data, config.SEQ_LENGTH, target_cols)
-    print(f"Total Sequences: {X.shape[0]}")
+    print(f"总序列数: {X.shape[0]}")
     
-    # 打印类别分布
     up_count = (y[:, 0] == 1).sum()
     down_count = (y[:, 0] == 0).sum()
-    print(f"Class Distribution: UP={up_count} ({up_count/len(y):.1%}), DOWN={down_count} ({down_count/len(y):.1%})")
+    print(f"类别分布: UP={up_count} ({up_count/len(y):.1%}), DOWN={down_count} ({down_count/len(y):.1%})")
     
     X_to = torch.FloatTensor(X).to(device)
     y_to = torch.FloatTensor(y).to(device)
@@ -98,23 +99,31 @@ def train():
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=config.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=config.BATCH_SIZE, shuffle=False)
     
-    model = AttentionBiGRU(
+    # 使用增强模型
+    model = EnhancedAttentionBiGRU(
         input_dim=X.shape[2], 
         hidden_dim=config.HIDDEN_DIM, 
         num_layers=config.NUM_LAYERS,
+        num_heads=config.NUM_HEADS,
         dropout=config.DROPOUT
     ).to(device)
     
-    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS, eta_min=1e-5)
+    # 统计参数量
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\n模型参数量: {total_params:,} (可训练: {trainable_params:,})")
+    
+    optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=2, eta_min=1e-6
+    )
     
     best_val_acc = 0
     patience_counter = 0
     
-    print(f"Start Training on {device}...")
+    print(f"\n开始训练...")
     
     for epoch in range(config.EPOCHS):
-        # --- 训练阶段 ---
         model.train()
         total_train_loss = 0
         train_correct = 0
@@ -124,12 +133,9 @@ def train():
         for bx, by in pbar:
             optimizer.zero_grad()
             
-            target_dir = by[:, 0].unsqueeze(1)  # 0/1 标签
-            
-            # 前向传播
+            target_dir = by[:, 0].unsqueeze(1)
             pred_dir, pred_conf, _ = model(bx)
             
-            # Focal Loss for classification
             loss = focal_loss(pred_dir, target_dir)
             
             loss.backward()
@@ -138,7 +144,6 @@ def train():
             
             total_train_loss += loss.item()
             
-            # 计算准确率
             pred_label = (pred_dir > 0.5).float()
             train_correct += (pred_label == target_dir).sum().item()
             train_total += target_dir.size(0)
@@ -149,7 +154,6 @@ def train():
         avg_train_loss = total_train_loss / len(train_loader)
         train_acc = train_correct / train_total
         
-        # --- 验证阶段 ---
         model.eval()
         total_val_loss = 0
         val_correct = 0
@@ -157,12 +161,10 @@ def train():
         with torch.no_grad():
             for bx, by in val_loader:
                 target_dir = by[:, 0].unsqueeze(1)
-                
                 pred_dir, pred_conf, _ = model(bx)
                 loss = focal_loss(pred_dir, target_dir)
                 
                 total_val_loss += loss.item()
-                
                 pred_label = (pred_dir > 0.5).float()
                 val_correct += (pred_label == target_dir).sum().item()
                 val_total += target_dir.size(0)
@@ -170,23 +172,25 @@ def train():
         avg_val_loss = total_val_loss / len(val_loader)
         val_acc = val_correct / val_total
         
-        print(f"Epoch {epoch+1}: Train Loss {avg_train_loss:.4f} Acc {train_acc:.2%} | Val Loss {avg_val_loss:.4f} Acc {val_acc:.2%}")
+        print(f"Epoch {epoch+1}: Train Loss {avg_train_loss:.4f} Acc {train_acc:.2%} | Val Loss {avg_val_loss:.4f} Acc {val_acc:.2%} | LR {optimizer.param_groups[0]['lr']:.6f}")
         
-        # 保存最佳模型 (基于准确率)
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
             torch.save(model.state_dict(), f"models/{config.MODEL_PATH}")
-            print(f"  -> 模型已保存 (新最佳验证准确率: {best_val_acc:.2%})")
+            print(f"  ✓ 模型已保存 (新最佳验证准确率: {best_val_acc:.2%})")
         else:
             patience_counter += 1
-            print(f"  -> No improvement. Patience {patience_counter}/{config.PATIENCE}")
+            print(f"  → 未改进. Patience {patience_counter}/{config.PATIENCE}")
             
         if patience_counter >= config.PATIENCE:
             print("Early stopping triggered.")
             break
     
     print(f"\n训练完成! 最佳验证准确率: {best_val_acc:.2%}")
+    print(f"\n对比基线模型 (53.71%), 增强模型准确率: {best_val_acc:.2%}")
+    improvement = (best_val_acc - 0.5371) * 100
+    print(f"性能提升: {improvement:+.2f}%")
 
 if __name__ == "__main__":
     train()

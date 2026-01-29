@@ -22,8 +22,8 @@ class Config:
     TICKERS_FACTORS = ["^GSPC", "DX-Y.NYB", "^VIX", "GC=F"]
     
     # 特征工程
-    SEQ_LENGTH = 60    # 序列长度：回看过去 60 天的数据进行预测
-    PREDICT_STEPS = 1  # 预测步长：预测未来 1 天
+    SEQ_LENGTH = 30    # 缩短序列长度，减少"旧信息"的影响
+    PREDICT_STEPS = 1  # 预测步长  
     
     # 模型参数
     MODEL_TYPE = "AttentionBiGRU" 

@@ -278,9 +278,14 @@ def preprocess_data(df):
     # 1. 技术指标
     close = df['Oil_Close']
     
-    # 简单移动平均 (SMA)
+    # 简单移动平均 (SMA) 及其相对距离 (Stationary)
     df['SMA_5'] = close.rolling(window=5).mean()
     df['SMA_20'] = close.rolling(window=20).mean()
+    
+    # [新增] 相对均线距离 (Dist) - 替代绝对 SMA 值
+    # 如果 Dist > 0，说明价格在均线上方
+    df['Dist_SMA_5'] = (close - df['SMA_5']) / df['SMA_5']
+    df['Dist_SMA_20'] = (close - df['SMA_20']) / df['SMA_20']
     
     # RSI (相对强弱指数)
     delta = close.diff()
@@ -289,27 +294,56 @@ def preprocess_data(df):
     rs = gain / (loss + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD (指数平滑异同移动平均线)
+    # MACD 
     exp1 = close.ewm(span=12, adjust=False).mean()
     exp2 = close.ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
+    # MACD 本身是差值，可以说是相对的，但除以价格可以标准化
+    df['MACD'] = (exp1 - exp2) / close 
     
-    # 布林带 (Bollinger Bands)
+    # 动量指标 (ROC) - 一阶导数
+    df['ROC_1'] = df['Oil_Close'].pct_change(1).fillna(0)
+    df['ROC_3'] = df['Oil_Close'].pct_change(3).fillna(0)
+    df['ROC_5'] = df['Oil_Close'].pct_change(5).fillna(0)
+    
+    # [关键新增] 二阶导数特征 (加速度) - 检测趋势变化
+    # 这些特征在转折点会比一阶导数更早发出信号
+    df['ROC_Accel_1'] = df['ROC_1'].diff().fillna(0)  # ROC的变化率
+    df['ROC_Accel_3'] = df['ROC_3'].diff().fillna(0)
+    df['RSI_Momentum'] = df['RSI'].diff().fillna(0)   # RSI的变化方向
+    
+    # 布林带 (Bollinger Bands) -> 转换为 %B 指标
     roll_mean = close.rolling(window=20).mean()
     roll_std = close.rolling(window=20).std()
-    df['Bollinger_Upper'] = roll_mean + (2 * roll_std)
-    df['Bollinger_Lower'] = roll_mean - (2 * roll_std)
+    upper = roll_mean + (2 * roll_std)
+    lower = roll_mean - (2 * roll_std)
+    
+    # %B: 价格在带宽中的位置。 >1 超买, <0 超卖. 完全Stationary.
+    df['Bollinger_PctB'] = (close - lower) / (upper - lower + 1e-6)
+    # Bandwidth: 带宽宽度，反映波动率
+    df['Bollinger_Width'] = (upper - lower) / roll_mean
+    
+    # [新增] 处理辅助因子 - 全部转为收益率
+    for t in config.TICKERS_FACTORS:
+        col = f"{t}_Close"
+        if col in df.columns:
+            # 使用 Log Return 替代绝对价格
+            df[f"{t}_Ret"] = np.log(df[col] / df[col].shift(1)).fillna(0)
     
     # 2. 新闻影响因子 (-1 到 1)
     df['News_Impact'] = calculate_news_impact_score(df)
     
-    # 3. 创建训练目标标签 (次日收盘价)
-    df['Target_Price'] = df['Oil_Close'].shift(-config.PREDICT_STEPS)
+    # 3. 创建训练目标标签 (Log Return)
+    df['Target_Return'] = np.log(df['Oil_Close'].shift(-config.PREDICT_STEPS) / df['Oil_Close'])
     
-    # 4. 波动率目标 (次日高低差)
+    # [新增] 分类目标: 涨/跌 (用于多任务学习)
+    # 1 = 涨, 0 = 跌
+    df['Target_Direction'] = (df['Target_Return'] > 0).astype(float)
+    
+    # 4. 波动率目标
     next_high = df['Oil_High'].shift(-config.PREDICT_STEPS)
     next_low = df['Oil_Low'].shift(-config.PREDICT_STEPS)
-    df['Target_Volatility'] = next_high - next_low
+    # 转换为相对波动率 (Range / Close)
+    df['Target_Volatility'] = (next_high - next_low) / df['Oil_Close']
     
     # 删除因移动/滞后或指标计算产生的 NaN
     df = df.dropna()
